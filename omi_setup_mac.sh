@@ -806,58 +806,69 @@ install_gcloud_sdk() {
 
     log_step "Step 9: Installing Google Cloud SDK"
 
-    # Install Python 3.13 if needed (required by Homebrew's gcloud installation)
-    # but we'll configure gcloud to use Python 3.12 for actual operations
-    if ! brew list python@3.13 &>/dev/null; then
-        log_info "Installing Python 3.13 (required by gcloud installation)..."
-        brew install python@3.13
-    fi
-
-    # Configure gcloud to use Python 3.12 for operations (compatible with both gcloud and our backend)
+    # Configure gcloud to use Python 3.12 (compatible with both gcloud and our backend)
     if command_exists python3.12; then
         export CLOUDSDK_PYTHON="python3.12"
-        log_info "Configured gcloud to use Python 3.12 for operations"
+        log_info "Configured gcloud to use Python 3.12"
     else
         log_warning "Python 3.12 not found - gcloud may use system Python"
     fi
 
     if command_exists gcloud; then
         log_success "Google Cloud SDK is already installed"
-
-        # Check if gcloud needs updating
-        log_info "Checking for gcloud updates..."
-        if brew list google-cloud-sdk &>/dev/null || brew list gcloud-cli &>/dev/null; then
-            log_info "Updating gcloud via Homebrew..."
-            # Try to upgrade, but don't fail if it errors due to Python issues
-            if ! brew upgrade google-cloud-sdk 2>/dev/null && ! brew upgrade gcloud-cli 2>/dev/null; then
-                log_warning "gcloud upgrade encountered issues, trying reinstall..."
-                # Uninstall and reinstall to fix Python virtualenv issues
-                brew uninstall --ignore-dependencies google-cloud-sdk 2>/dev/null || true
-                brew uninstall --ignore-dependencies gcloud-cli 2>/dev/null || true
-                brew install --cask google-cloud-sdk
-            fi
-        else
-            log_warning "gcloud not installed via Homebrew - update manually if needed"
-            log_info "To update: gcloud components update"
-        fi
-
         gcloud version
-    else
-        log_info "Installing Google Cloud SDK via Homebrew..."
-        brew install --cask google-cloud-sdk
 
-        # Source the SDK paths
-        if [[ -f "/opt/homebrew/share/google-cloud-sdk/path.bash.inc" ]]; then
-            source "/opt/homebrew/share/google-cloud-sdk/path.bash.inc"
-        elif [[ -f "/opt/homebrew/share/google-cloud-sdk/completion.bash.inc" ]]; then
-            source "/opt/homebrew/share/google-cloud-sdk/completion.bash.inc"
-        elif [[ -f "/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc" ]]; then
-            source "/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc"
-        elif [[ -f "/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc" ]]; then
-            source "/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc"
+        # Update components if needed
+        log_info "Checking for gcloud updates..."
+        gcloud components update --quiet 2>/dev/null || log_warning "Could not update gcloud components"
+    else
+        # Uninstall any broken Homebrew installations first
+        log_info "Removing any existing Homebrew gcloud installations..."
+        brew uninstall --ignore-dependencies google-cloud-sdk 2>/dev/null || true
+        brew uninstall --ignore-dependencies gcloud-cli 2>/dev/null || true
+
+        log_info "Downloading Google Cloud SDK from official source..."
+
+        # Determine architecture
+        local arch=$(uname -m)
+        local gcloud_url
+        if [[ "$arch" == "arm64" ]]; then
+            gcloud_url="https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-darwin-arm.tar.gz"
+        else
+            gcloud_url="https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-darwin-x86_64.tar.gz"
         fi
 
-        log_success "Google Cloud SDK installed successfully"
+        # Download and extract to /usr/local
+        local install_dir="${HOME}/.local/share"
+        mkdir -p "$install_dir"
+
+        log_info "Downloading gcloud SDK..."
+        if curl -o /tmp/google-cloud-sdk.tar.gz "$gcloud_url"; then
+            log_info "Extracting gcloud SDK..."
+            tar -xzf /tmp/google-cloud-sdk.tar.gz -C "$install_dir"
+            rm /tmp/google-cloud-sdk.tar.gz
+
+            # Run the install script with Python 3.12
+            log_info "Running gcloud installation script..."
+            CLOUDSDK_PYTHON="python3.12" "${install_dir}/google-cloud-sdk/install.sh" \
+                --quiet \
+                --usage-reporting=false \
+                --path-update=true \
+                --command-completion=true
+
+            # Source the paths
+            if [[ -f "${install_dir}/google-cloud-sdk/path.bash.inc" ]]; then
+                source "${install_dir}/google-cloud-sdk/path.bash.inc"
+            fi
+
+            # Add to PATH for current session
+            export PATH="${install_dir}/google-cloud-sdk/bin:$PATH"
+
+            log_success "Google Cloud SDK installed successfully to ${install_dir}/google-cloud-sdk"
+        else
+            log_error "Failed to download Google Cloud SDK"
+            exit 1
+        fi
     fi
 
     # Configure gcloud to use Python 3.12 for all operations
