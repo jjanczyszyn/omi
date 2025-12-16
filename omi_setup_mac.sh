@@ -21,6 +21,13 @@ set -e  # Exit on error
 set -o pipefail  # Exit on pipe failure
 
 ################################################################################
+# CONFIGURATION
+################################################################################
+
+# State file to track progress
+STATE_FILE="${HOME}/.omi-setup-state.json"
+
+################################################################################
 # UTILITY FUNCTIONS
 ################################################################################
 
@@ -62,6 +69,66 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Initialize state file
+init_state() {
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo '{"completed_steps": []}' > "$STATE_FILE"
+    fi
+}
+
+# Check if step is completed
+is_step_completed() {
+    local step_name="$1"
+    if [[ ! -f "$STATE_FILE" ]]; then
+        return 1
+    fi
+    grep -q "\"$step_name\"" "$STATE_FILE"
+}
+
+# Mark step as completed
+mark_step_completed() {
+    local step_name="$1"
+    if [[ ! -f "$STATE_FILE" ]]; then
+        init_state
+    fi
+
+    # Read current state
+    local current_state=$(cat "$STATE_FILE")
+
+    # Add step to completed list if not already there
+    if ! is_step_completed "$step_name"; then
+        local new_state=$(echo "$current_state" | python3 -c "
+import sys, json
+state = json.load(sys.stdin)
+state['completed_steps'].append('$step_name')
+print(json.dumps(state, indent=2))
+")
+        echo "$new_state" > "$STATE_FILE"
+        log_success "Progress saved: $step_name"
+    fi
+}
+
+# Reset state (start over)
+reset_state() {
+    rm -f "$STATE_FILE"
+    log_info "Progress reset - starting fresh"
+}
+
+# Show progress
+show_progress() {
+    if [[ -f "$STATE_FILE" ]]; then
+        log_info "Completed steps:"
+        cat "$STATE_FILE" | python3 -c "
+import sys, json
+state = json.load(sys.stdin)
+for step in state.get('completed_steps', []):
+    print(f'  ✓ {step}')
+"
+    else
+        log_info "No progress saved yet"
+    fi
+}
+
 # Prompt for confirmation
 confirm() {
     local prompt="$1"
@@ -96,6 +163,34 @@ update_env_var() {
     else
         # Key doesn't exist, append it
         echo "${key}=${value}" >> "$env_file"
+    fi
+}
+
+# Check if env var exists and is non-empty
+env_var_exists() {
+    local key="$1"
+    local env_file="$2"
+
+    if [[ ! -f "$env_file" ]]; then
+        return 1
+    fi
+
+    local value=$(grep "^${key}=" "$env_file" 2>/dev/null | cut -d'=' -f2-)
+    [[ -n "$value" ]]
+}
+
+# Get masked value for display (shows first 4 and last 4 chars)
+get_masked_value() {
+    local key="$1"
+    local env_file="$2"
+
+    local value=$(grep "^${key}=" "$env_file" 2>/dev/null | cut -d'=' -f2-)
+    if [[ ${#value} -gt 8 ]]; then
+        echo "${value:0:4}...${value: -4}"
+    elif [[ -n "$value" ]]; then
+        echo "****"
+    else
+        echo ""
     fi
 }
 
@@ -139,6 +234,13 @@ read_with_default() {
 
 # Step 1: Install Homebrew if needed
 install_homebrew() {
+    local step_name="install_homebrew"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 1: Homebrew (already completed)"
+        return 0
+    fi
+
     log_step "Step 1: Checking Homebrew Installation"
 
     if command_exists brew; then
@@ -155,22 +257,72 @@ install_homebrew() {
 
         log_success "Homebrew installed successfully"
     fi
+
+    mark_step_completed "$step_name"
 }
 
 # Step 2: Install Python
 install_python() {
+    local step_name="install_python"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 2: Python (already completed)"
+        # Still export commands for use in later steps
+        PYTHON_CMD="${PYTHON_CMD:-python3.12}"
+        if command_exists pip3; then
+            PIP_CMD="pip3"
+        else
+            PIP_CMD="pip"
+        fi
+        export PYTHON_CMD PIP_CMD
+        return 0
+    fi
+
     log_step "Step 2: Installing Python"
 
+    # Check current Python version
+    local current_python_version=""
     if command_exists python3; then
-        log_success "Python 3 is already installed"
-        python3 --version
-        PYTHON_CMD="python3"
+        current_python_version=$(python3 --version 2>&1 | awk '{print $2}')
+        local major=$(echo "$current_python_version" | cut -d. -f1)
+        local minor=$(echo "$current_python_version" | cut -d. -f2)
+
+        log_info "Found Python $current_python_version"
+
+        # Check if Python 3.13+ (incompatible with numba)
+        if [[ $major -eq 3 && $minor -ge 13 ]]; then
+            log_error "Python 3.13+ detected, but numba requires Python 3.9-3.12"
+            log_warning "Need to install Python 3.12 for compatibility"
+
+            # Check if Python 3.12 is available
+            if command_exists python3.12; then
+                log_success "Python 3.12 is already installed"
+                PYTHON_CMD="python3.12"
+            else
+                log_info "Installing Python 3.12 via Homebrew..."
+                brew install python@3.12
+                PYTHON_CMD="python3.12"
+                log_success "Python 3.12 installed successfully"
+            fi
+        elif [[ $major -eq 3 && $minor -ge 9 ]]; then
+            log_success "Python $current_python_version is compatible"
+            PYTHON_CMD="python3"
+        else
+            log_error "Python version too old. Need Python 3.9-3.12"
+            log_info "Installing Python 3.12..."
+            brew install python@3.12
+            PYTHON_CMD="python3.12"
+        fi
     else
-        log_info "Installing Python 3 via Homebrew..."
-        brew install python
-        PYTHON_CMD="python3"
-        log_success "Python 3 installed successfully"
+        log_info "Installing Python 3.12 via Homebrew..."
+        brew install python@3.12
+        PYTHON_CMD="python3.12"
+        log_success "Python 3.12 installed successfully"
     fi
+
+    # Verify the chosen Python version
+    log_info "Using Python: $PYTHON_CMD"
+    $PYTHON_CMD --version
 
     # Check for pip
     if command_exists pip3; then
@@ -185,10 +337,18 @@ install_python() {
     fi
 
     export PYTHON_CMD PIP_CMD
+    mark_step_completed "$step_name"
 }
 
 # Step 3: Install system dependencies
 install_system_dependencies() {
+    local step_name="install_system_dependencies"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 3: System Dependencies (already completed)"
+        return 0
+    fi
+
     log_step "Step 3: Installing System Dependencies"
 
     local deps=("git" "ffmpeg" "opus")
@@ -202,10 +362,23 @@ install_system_dependencies() {
             log_success "$dep installed successfully"
         fi
     done
+
+    mark_step_completed "$step_name"
 }
 
 # Step 4: Validate repository
 validate_repository() {
+    local step_name="validate_repository"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 4: Repository Validation (already completed)"
+        # Still set variables for later steps
+        REPO_PATH="${REPO_PATH:-$(pwd)}"
+        BACKEND_PATH="$REPO_PATH/backend"
+        export REPO_PATH BACKEND_PATH
+        return 0
+    fi
+
     log_step "Step 4: Validating Omi Repository"
 
     local repo_path
@@ -228,10 +401,21 @@ validate_repository() {
     log_success "Repository validated: $REPO_PATH"
     cd "$BACKEND_PATH"
     log_info "Changed directory to: $BACKEND_PATH"
+
+    mark_step_completed "$step_name"
 }
 
 # Step 5: Configure environment file
 configure_env_file() {
+    local step_name="configure_env_file"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 5: Environment File (already completed)"
+        ENV_FILE="$BACKEND_PATH/.env"
+        export ENV_FILE
+        return 0
+    fi
+
     log_step "Step 5: Configuring Environment File"
 
     local env_file="$BACKEND_PATH/.env"
@@ -261,78 +445,168 @@ configure_env_file() {
     fi
 
     ENV_FILE="$env_file"
+    mark_step_completed "$step_name"
 }
 
 # Step 6: Collect environment variables
 collect_env_variables() {
+    local step_name="collect_env_variables"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 6: Environment Variables (already completed)"
+        return 0
+    fi
+
     log_step "Step 6: Collecting Environment Variables"
 
     log_warning "You will be prompted for API keys and credentials."
-    log_warning "These values will NOT be echoed back to the console."
+    log_warning "Existing values will be skipped unless you choose to update them."
     echo ""
 
     # OPENAI_API_KEY
-    local openai_key
-    if read_secret "Enter OPENAI_API_KEY: " "openai_key"; then
-        update_env_var "OPENAI_API_KEY" "$openai_key" "$ENV_FILE"
-        log_success "OPENAI_API_KEY configured"
+    if env_var_exists "OPENAI_API_KEY" "$ENV_FILE"; then
+        local masked=$(get_masked_value "OPENAI_API_KEY" "$ENV_FILE")
+        log_success "OPENAI_API_KEY already set ($masked)"
+        if confirm "Update OPENAI_API_KEY?" "n"; then
+            local openai_key
+            if read_secret "Enter new OPENAI_API_KEY: " "openai_key"; then
+                update_env_var "OPENAI_API_KEY" "$openai_key" "$ENV_FILE"
+                log_success "OPENAI_API_KEY updated"
+            fi
+        fi
     else
-        log_warning "OPENAI_API_KEY not provided"
+        local openai_key
+        if read_secret "Enter OPENAI_API_KEY: " "openai_key"; then
+            update_env_var "OPENAI_API_KEY" "$openai_key" "$ENV_FILE"
+            log_success "OPENAI_API_KEY configured"
+        else
+            log_warning "OPENAI_API_KEY not provided"
+        fi
     fi
 
     # DEEPGRAM_API_KEY
-    local deepgram_key
-    if read_secret "Enter DEEPGRAM_API_KEY: " "deepgram_key"; then
-        update_env_var "DEEPGRAM_API_KEY" "$deepgram_key" "$ENV_FILE"
-        log_success "DEEPGRAM_API_KEY configured"
+    if env_var_exists "DEEPGRAM_API_KEY" "$ENV_FILE"; then
+        local masked=$(get_masked_value "DEEPGRAM_API_KEY" "$ENV_FILE")
+        log_success "DEEPGRAM_API_KEY already set ($masked)"
+        if confirm "Update DEEPGRAM_API_KEY?" "n"; then
+            local deepgram_key
+            if read_secret "Enter new DEEPGRAM_API_KEY: " "deepgram_key"; then
+                update_env_var "DEEPGRAM_API_KEY" "$deepgram_key" "$ENV_FILE"
+                log_success "DEEPGRAM_API_KEY updated"
+            fi
+        fi
     else
-        log_warning "DEEPGRAM_API_KEY not provided"
+        local deepgram_key
+        if read_secret "Enter DEEPGRAM_API_KEY: " "deepgram_key"; then
+            update_env_var "DEEPGRAM_API_KEY" "$deepgram_key" "$ENV_FILE"
+            log_success "DEEPGRAM_API_KEY configured"
+        else
+            log_warning "DEEPGRAM_API_KEY not provided"
+        fi
     fi
 
-    # Redis URL
-    local redis_url
+    # Redis
     echo ""
-    log_info "Enter Redis connection details (Upstash or other):"
-    read_with_default "REDIS_DB_HOST" "redis_host" ""
-    read_with_default "REDIS_DB_PORT" "redis_port" "6379"
-    if read_secret "REDIS_DB_PASSWORD: " "redis_password"; then
-        update_env_var "REDIS_DB_HOST" "$redis_host" "$ENV_FILE"
-        update_env_var "REDIS_DB_PORT" "$redis_port" "$ENV_FILE"
-        update_env_var "REDIS_DB_PASSWORD" "$redis_password" "$ENV_FILE"
-        log_success "Redis credentials configured"
+    if env_var_exists "REDIS_DB_HOST" "$ENV_FILE" && env_var_exists "REDIS_DB_PASSWORD" "$ENV_FILE"; then
+        log_success "Redis credentials already configured"
+        if confirm "Update Redis credentials?" "n"; then
+            log_info "Enter Redis connection details (Upstash or other):"
+            read_with_default "REDIS_DB_HOST" "redis_host" ""
+            read_with_default "REDIS_DB_PORT" "redis_port" "6379"
+            if read_secret "REDIS_DB_PASSWORD: " "redis_password"; then
+                update_env_var "REDIS_DB_HOST" "$redis_host" "$ENV_FILE"
+                update_env_var "REDIS_DB_PORT" "$redis_port" "$ENV_FILE"
+                update_env_var "REDIS_DB_PASSWORD" "$redis_password" "$ENV_FILE"
+                log_success "Redis credentials updated"
+            fi
+        fi
     else
-        log_warning "Redis credentials not fully provided"
+        log_info "Enter Redis connection details (Upstash or other):"
+        read_with_default "REDIS_DB_HOST" "redis_host" ""
+        read_with_default "REDIS_DB_PORT" "redis_port" "6379"
+        if read_secret "REDIS_DB_PASSWORD: " "redis_password"; then
+            update_env_var "REDIS_DB_HOST" "$redis_host" "$ENV_FILE"
+            update_env_var "REDIS_DB_PORT" "$redis_port" "$ENV_FILE"
+            update_env_var "REDIS_DB_PASSWORD" "$redis_password" "$ENV_FILE"
+            log_success "Redis credentials configured"
+        else
+            log_warning "Redis credentials not fully provided"
+        fi
     fi
 
     # ADMIN_KEY
     echo ""
-    local admin_key
-    read_with_default "Enter ADMIN_KEY for local dev" "admin_key" "123"
-    update_env_var "ADMIN_KEY" "$admin_key" "$ENV_FILE"
-    log_success "ADMIN_KEY configured"
+    if env_var_exists "ADMIN_KEY" "$ENV_FILE"; then
+        log_success "ADMIN_KEY already set"
+        if confirm "Update ADMIN_KEY?" "n"; then
+            local admin_key
+            read_with_default "Enter ADMIN_KEY for local dev" "admin_key" "123"
+            update_env_var "ADMIN_KEY" "$admin_key" "$ENV_FILE"
+            log_success "ADMIN_KEY updated"
+        fi
+    else
+        local admin_key
+        read_with_default "Enter ADMIN_KEY for local dev" "admin_key" "123"
+        update_env_var "ADMIN_KEY" "$admin_key" "$ENV_FILE"
+        log_success "ADMIN_KEY configured"
+    fi
 
     # Pinecone
     echo ""
-    log_info "Configuring Pinecone..."
-    local pinecone_key
-    if read_secret "Enter PINECONE_API_KEY: " "pinecone_key"; then
-        update_env_var "PINECONE_API_KEY" "$pinecone_key" "$ENV_FILE"
+    if env_var_exists "PINECONE_API_KEY" "$ENV_FILE"; then
+        local masked=$(get_masked_value "PINECONE_API_KEY" "$ENV_FILE")
+        log_success "PINECONE_API_KEY already set ($masked)"
+        if confirm "Update Pinecone credentials?" "n"; then
+            local pinecone_key
+            if read_secret "Enter new PINECONE_API_KEY: " "pinecone_key"; then
+                update_env_var "PINECONE_API_KEY" "$pinecone_key" "$ENV_FILE"
 
-        local pinecone_index
-        read_with_default "Enter PINECONE_INDEX_NAME" "pinecone_index" "omi"
-        update_env_var "PINECONE_INDEX_NAME" "$pinecone_index" "$ENV_FILE"
+                local pinecone_index
+                read_with_default "Enter PINECONE_INDEX_NAME" "pinecone_index" "omi"
+                update_env_var "PINECONE_INDEX_NAME" "$pinecone_index" "$ENV_FILE"
 
-        log_success "Pinecone credentials configured"
+                log_success "Pinecone credentials updated"
+            fi
+        fi
     else
-        log_warning "Pinecone credentials not provided"
+        log_info "Configuring Pinecone..."
+        local pinecone_key
+        if read_secret "Enter PINECONE_API_KEY: " "pinecone_key"; then
+            update_env_var "PINECONE_API_KEY" "$pinecone_key" "$ENV_FILE"
+
+            local pinecone_index
+            read_with_default "Enter PINECONE_INDEX_NAME" "pinecone_index" "omi"
+            update_env_var "PINECONE_INDEX_NAME" "$pinecone_index" "$ENV_FILE"
+
+            log_success "Pinecone credentials configured"
+        else
+            log_warning "Pinecone credentials not provided"
+        fi
     fi
 
     echo ""
     log_success "Environment variables collection complete"
+    mark_step_completed "$step_name"
 }
 
 # Step 7: Setup Python virtual environment
 setup_python_venv() {
+    local step_name="setup_python_venv"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 7: Python venv (already completed)"
+        # Activate venv if it exists for later steps
+        if [[ -d "$BACKEND_PATH/venv" ]]; then
+            source "$BACKEND_PATH/venv/bin/activate"
+            VENV_CREATED="yes"
+            VENV_PATH="$BACKEND_PATH/venv"
+        else
+            VENV_CREATED="no"
+        fi
+        export VENV_CREATED VENV_PATH
+        return 0
+    fi
+
     log_step "Step 7: Setting Up Python Virtual Environment"
 
     local use_venv="y"
@@ -346,19 +620,23 @@ setup_python_venv() {
     if [[ "$use_venv" == "y" ]]; then
         VENV_PATH="$BACKEND_PATH/venv"
 
+        # Show which Python version will be used
+        local python_version=$($PYTHON_CMD --version 2>&1)
+        log_info "Using $python_version for virtual environment"
+
         if [[ -d "$VENV_PATH" ]]; then
             log_warning "Virtual environment already exists at: $VENV_PATH"
 
             if confirm "Recreate virtual environment?" "n"; then
                 log_info "Removing existing virtual environment..."
                 rm -rf "$VENV_PATH"
-                log_info "Creating new virtual environment..."
+                log_info "Creating new virtual environment with $PYTHON_CMD..."
                 "$PYTHON_CMD" -m venv "$VENV_PATH"
             else
                 log_info "Using existing virtual environment"
             fi
         else
-            log_info "Creating virtual environment..."
+            log_info "Creating virtual environment with $PYTHON_CMD..."
             "$PYTHON_CMD" -m venv "$VENV_PATH"
             log_success "Virtual environment created"
         fi
@@ -366,24 +644,108 @@ setup_python_venv() {
         log_info "Activating virtual environment..."
         source "$VENV_PATH/bin/activate"
 
+        log_info "Upgrading pip and setuptools..."
+        pip install --upgrade pip setuptools wheel
+
         log_info "Installing Python dependencies..."
-        pip install --upgrade pip
-        pip install -r "$BACKEND_PATH/requirements.txt"
+        log_warning "Note: This may take several minutes..."
+
+        # Fix for numba build errors: comprehensive approach
+        log_info "Pre-installing critical dependencies to avoid build errors..."
+
+        # Step 1: Install numpy first (required by many packages)
+        log_info "Installing numpy..."
+        pip install "numpy<2.0" --only-binary :all: || pip install "numpy<2.0"
+
+        # Step 2: Install llvmlite (required by numba)
+        log_info "Installing llvmlite..."
+        if ! pip install --only-binary :all: llvmlite; then
+            log_warning "Binary wheel not available for llvmlite, attempting source build..."
+            # On macOS, ensure llvm is available
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                if ! command_exists llvm-config; then
+                    log_info "Installing llvm@14 for llvmlite compilation..."
+                    brew install llvm@14
+                fi
+                # Set LLVM paths
+                export LLVM_CONFIG="$(brew --prefix llvm@14)/bin/llvm-config"
+                export LDFLAGS="-L$(brew --prefix llvm@14)/lib"
+                export CPPFLAGS="-I$(brew --prefix llvm@14)/include"
+            fi
+            pip install llvmlite
+        fi
+
+        # Step 3: Install numba explicitly
+        log_info "Installing numba..."
+        pip install --only-binary :all: numba || {
+            log_warning "Installing numba from source (this may take a few minutes)..."
+            pip install numba --no-build-isolation
+        }
+
+        # Now install the rest of the dependencies, preferring binary wheels
+        log_info "Installing remaining dependencies..."
+        pip install -r "$BACKEND_PATH/requirements.txt" --prefer-binary || {
+            log_warning "Some packages couldn't use binary wheels, retrying without restriction..."
+            pip install -r "$BACKEND_PATH/requirements.txt"
+        }
 
         log_success "Dependencies installed in virtual environment"
 
         VENV_CREATED="yes"
     else
         log_info "Installing dependencies globally..."
-        "$PIP_CMD" install -r "$BACKEND_PATH/requirements.txt"
+
+        # Apply same fix for global installation
+        log_info "Pre-installing critical dependencies to avoid build errors..."
+
+        # Install numpy first
+        log_info "Installing numpy..."
+        "$PIP_CMD" install "numpy<2.0" --only-binary :all: || "$PIP_CMD" install "numpy<2.0"
+
+        # Install llvmlite
+        log_info "Installing llvmlite..."
+        if ! "$PIP_CMD" install --only-binary :all: llvmlite; then
+            log_warning "Binary wheel not available for llvmlite, attempting source build..."
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                if ! command_exists llvm-config; then
+                    log_info "Installing llvm@14 for llvmlite compilation..."
+                    brew install llvm@14
+                fi
+                export LLVM_CONFIG="$(brew --prefix llvm@14)/bin/llvm-config"
+                export LDFLAGS="-L$(brew --prefix llvm@14)/lib"
+                export CPPFLAGS="-I$(brew --prefix llvm@14)/include"
+            fi
+            "$PIP_CMD" install llvmlite
+        fi
+
+        # Install numba explicitly
+        log_info "Installing numba..."
+        "$PIP_CMD" install --only-binary :all: numba || {
+            log_warning "Installing numba from source (this may take a few minutes)..."
+            "$PIP_CMD" install numba --no-build-isolation
+        }
+
+        # Install remaining dependencies
+        "$PIP_CMD" install -r "$BACKEND_PATH/requirements.txt" --prefer-binary || \
+            "$PIP_CMD" install -r "$BACKEND_PATH/requirements.txt"
+
         log_success "Dependencies installed globally"
 
         VENV_CREATED="no"
     fi
+
+    mark_step_completed "$step_name"
 }
 
 # Step 8: Configure Ngrok
 configure_ngrok() {
+    local step_name="configure_ngrok"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 8: Ngrok (already completed)"
+        return 0
+    fi
+
     log_step "Step 8: Configuring Ngrok"
 
     if command_exists ngrok; then
@@ -425,15 +787,34 @@ configure_ngrok() {
     local base_url="https://$NGROK_DOMAIN"
     update_env_var "BASE_API_URL" "$base_url" "$ENV_FILE"
     log_success "BASE_API_URL configured in .env"
+
+    mark_step_completed "$step_name"
 }
 
 # Step 9: Install Google Cloud SDK
 install_gcloud_sdk() {
+    local step_name="install_gcloud_sdk"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 9: Google Cloud SDK (already completed)"
+        return 0
+    fi
+
     log_step "Step 9: Installing Google Cloud SDK"
 
     if command_exists gcloud; then
         log_success "Google Cloud SDK is already installed"
         gcloud version
+
+        # Check if gcloud needs updating (check for Python 3.9 deprecation warning)
+        log_info "Checking for gcloud updates..."
+        if brew list google-cloud-sdk &>/dev/null; then
+            log_info "Updating gcloud via Homebrew..."
+            brew upgrade google-cloud-sdk || log_warning "gcloud already up to date"
+        else
+            log_warning "gcloud not installed via Homebrew - update manually if needed"
+            log_info "To update: gcloud components update"
+        fi
     else
         log_info "Installing Google Cloud SDK via Homebrew..."
         brew install google-cloud-sdk
@@ -447,10 +828,23 @@ install_gcloud_sdk() {
 
         log_success "Google Cloud SDK installed successfully"
     fi
+
+    # Final verification
+    local gcloud_version=$(gcloud version --format="value(version)" 2>/dev/null || echo "unknown")
+    log_info "gcloud version: $gcloud_version"
+
+    mark_step_completed "$step_name"
 }
 
 # Step 10: Configure GCP project
 configure_gcp_project() {
+    local step_name="configure_gcp_project"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 10: GCP Project (already completed)"
+        return 0
+    fi
+
     log_step "Step 10: Configuring Google Cloud Project"
 
     # Prompt for project ID
@@ -492,10 +886,19 @@ configure_gcp_project() {
         log_warning "Could not find application default credentials at: $creds_file"
         log_warning "You may need to set GOOGLE_APPLICATION_CREDENTIALS manually"
     fi
+
+    mark_step_completed "$step_name"
 }
 
 # Step 11: Enable required GCP APIs
 enable_gcp_apis() {
+    local step_name="enable_gcp_apis"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 11: GCP APIs (already completed)"
+        return 0
+    fi
+
     log_step "Step 11: Enabling Required Google Cloud APIs"
 
     local apis=(
@@ -518,10 +921,19 @@ enable_gcp_apis() {
             fi
         fi
     done
+
+    mark_step_completed "$step_name"
 }
 
 # Step 12: Configure Firestore indexes
 configure_firestore_indexes() {
+    local step_name="configure_firestore_indexes"
+
+    if is_step_completed "$step_name"; then
+        log_info "⏭️  Skipping Step 12: Firestore Indexes (already completed)"
+        return 0
+    fi
+
     log_step "Step 12: Configuring Firestore Composite Indexes"
 
     log_warning "Firestore composite indexes must be created for proper functionality."
@@ -545,6 +957,8 @@ configure_firestore_indexes() {
 
     read -p "Press Enter once you have created these indexes (or if they already exist)..."
     log_success "Firestore indexes configuration acknowledged"
+
+    mark_step_completed "$step_name"
 }
 
 # Step 13: Final setup and instructions
@@ -631,6 +1045,38 @@ start_backend() {
 ################################################################################
 
 main() {
+    # Parse command-line arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --reset)
+                reset_state
+                shift
+                ;;
+            --status)
+                show_progress
+                exit 0
+                ;;
+            --help)
+                echo "Usage: $0 [OPTIONS]"
+                echo ""
+                echo "Options:"
+                echo "  --reset    Reset progress and start from beginning"
+                echo "  --status   Show current progress"
+                echo "  --help     Show this help message"
+                echo ""
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Use --help for usage information"
+                exit 1
+                ;;
+        esac
+    done
+
+    # Initialize state tracking
+    init_state
+
     clear
     echo ""
     log_info "═══════════════════════════════════════════════════════════════"
@@ -640,6 +1086,16 @@ main() {
     log_warning "This script will guide you through setting up the Omi backend"
     log_warning "for local development on macOS."
     echo ""
+
+    # Show existing progress if any
+    if [[ -f "$STATE_FILE" ]]; then
+        local completed_count=$(cat "$STATE_FILE" | python3 -c "import sys, json; print(len(json.load(sys.stdin).get('completed_steps', [])))")
+        if [[ $completed_count -gt 0 ]]; then
+            log_info "📋 Resuming setup - $completed_count steps already completed"
+            log_info "   (Run with --status to see details, --reset to start over)"
+            echo ""
+        fi
+    fi
 
     if ! confirm "Continue with setup?" "y"; then
         log_info "Setup cancelled by user"
