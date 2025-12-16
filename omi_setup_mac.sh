@@ -806,10 +806,17 @@ install_gcloud_sdk() {
 
     log_step "Step 9: Installing Google Cloud SDK"
 
-    # Configure gcloud to use Python 3.12 (compatible with both gcloud and our backend)
+    # Install Python 3.13 if needed (required by Homebrew's gcloud installation)
+    # but we'll configure gcloud to use Python 3.12 for actual operations
+    if ! brew list python@3.13 &>/dev/null; then
+        log_info "Installing Python 3.13 (required by gcloud installation)..."
+        brew install python@3.13
+    fi
+
+    # Configure gcloud to use Python 3.12 for operations (compatible with both gcloud and our backend)
     if command_exists python3.12; then
         export CLOUDSDK_PYTHON="python3.12"
-        log_info "Configured gcloud to use Python 3.12"
+        log_info "Configured gcloud to use Python 3.12 for operations"
     else
         log_warning "Python 3.12 not found - gcloud may use system Python"
     fi
@@ -817,7 +824,7 @@ install_gcloud_sdk() {
     if command_exists gcloud; then
         log_success "Google Cloud SDK is already installed"
 
-        # Check if gcloud needs updating (check for Python 3.9 deprecation warning)
+        # Check if gcloud needs updating
         log_info "Checking for gcloud updates..."
         if brew list google-cloud-sdk &>/dev/null || brew list gcloud-cli &>/dev/null; then
             log_info "Updating gcloud via Homebrew..."
@@ -840,13 +847,23 @@ install_gcloud_sdk() {
         brew install --cask google-cloud-sdk
 
         # Source the SDK paths
-        if [[ -f "/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc" ]]; then
+        if [[ -f "/opt/homebrew/share/google-cloud-sdk/path.bash.inc" ]]; then
+            source "/opt/homebrew/share/google-cloud-sdk/path.bash.inc"
+        elif [[ -f "/opt/homebrew/share/google-cloud-sdk/completion.bash.inc" ]]; then
+            source "/opt/homebrew/share/google-cloud-sdk/completion.bash.inc"
+        elif [[ -f "/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc" ]]; then
             source "/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc"
         elif [[ -f "/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc" ]]; then
             source "/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc"
         fi
 
         log_success "Google Cloud SDK installed successfully"
+    fi
+
+    # Configure gcloud to use Python 3.12 for all operations
+    if command_exists gcloud && command_exists python3.12; then
+        log_info "Configuring gcloud Python interpreter..."
+        gcloud config set core/custom_python_interpreter "$(which python3.12)" 2>/dev/null || true
     fi
 
     # Final verification

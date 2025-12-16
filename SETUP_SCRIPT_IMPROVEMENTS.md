@@ -127,7 +127,7 @@ fi
 ```
 
 ### 5. GCloud SDK Python Configuration ✅
-The script now configures gcloud to use Python 3.12, avoiding both deprecation warnings and virtualenv errors.
+The script now properly handles gcloud's Python requirements while using Python 3.12 for operations.
 
 **Problems:**
 ```
@@ -135,35 +135,37 @@ WARNING: Python 3.9 will be deprecated on January 27th, 2026
 ERROR: (gcloud.config.virtualenv.create) /opt/homebrew/opt/python@3.13/libexec/bin/python3: command not found
 ```
 
+**Root Cause:**
+- Homebrew's gcloud installation creates a virtualenv using Python 3.13
+- But Python 3.13 wasn't installed at the expected Homebrew path
+- Setting CLOUDSDK_PYTHON before installation doesn't affect Homebrew's install script
+
 **Solution:**
+- Install Python 3.13 via Homebrew (satisfies gcloud installation requirements)
 - Set `CLOUDSDK_PYTHON=python3.12` environment variable for all gcloud commands
+- Configure gcloud's custom Python interpreter to use Python 3.12
 - Check for gcloud updates when SDK is already installed
 - Automatically upgrade via Homebrew if available
 - Handle upgrade failures gracefully with reinstall fallback
-- Provide manual update instructions if not using Homebrew
 
 **Code Added:**
 ```bash
-# Configure gcloud to use Python 3.12
-if command_exists python3.12; then
-    export CLOUDSDK_PYTHON="python3.12"
-    log_info "Configured gcloud to use Python 3.12"
+# Install Python 3.13 (required by Homebrew's gcloud installation)
+if ! brew list python@3.13 &>/dev/null; then
+    log_info "Installing Python 3.13 (required by gcloud installation)..."
+    brew install python@3.13
 fi
 
-if command_exists gcloud; then
-    # Check if gcloud needs updating
-    log_info "Checking for gcloud updates..."
-    if brew list google-cloud-sdk &>/dev/null || brew list gcloud-cli &>/dev/null; then
-        log_info "Updating gcloud via Homebrew..."
-        # Try to upgrade, but don't fail if it errors due to Python issues
-        if ! brew upgrade google-cloud-sdk 2>/dev/null && ! brew upgrade gcloud-cli 2>/dev/null; then
-            log_warning "gcloud upgrade encountered issues, trying reinstall..."
-            # Uninstall and reinstall to fix Python virtualenv issues
-            brew uninstall --ignore-dependencies google-cloud-sdk 2>/dev/null || true
-            brew uninstall --ignore-dependencies gcloud-cli 2>/dev/null || true
-            brew install --cask google-cloud-sdk
-        fi
-    fi
+# Configure gcloud to use Python 3.12 for operations
+if command_exists python3.12; then
+    export CLOUDSDK_PYTHON="python3.12"
+    log_info "Configured gcloud to use Python 3.12 for operations"
+fi
+
+# After installation, configure gcloud's Python interpreter
+if command_exists gcloud && command_exists python3.12; then
+    log_info "Configuring gcloud Python interpreter..."
+    gcloud config set core/custom_python_interpreter "$(which python3.12)" 2>/dev/null || true
 fi
 ```
 
