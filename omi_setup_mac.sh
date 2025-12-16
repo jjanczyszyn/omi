@@ -797,27 +797,47 @@ install_gcloud_sdk() {
 
     if is_step_completed "$step_name"; then
         log_info "⏭️  Skipping Step 9: Google Cloud SDK (already completed)"
+        # Restore CLOUDSDK_PYTHON setting
+        if command_exists python3.12; then
+            export CLOUDSDK_PYTHON="python3.12"
+        fi
         return 0
     fi
 
     log_step "Step 9: Installing Google Cloud SDK"
 
+    # Configure gcloud to use Python 3.12 (compatible with both gcloud and our backend)
+    if command_exists python3.12; then
+        export CLOUDSDK_PYTHON="python3.12"
+        log_info "Configured gcloud to use Python 3.12"
+    else
+        log_warning "Python 3.12 not found - gcloud may use system Python"
+    fi
+
     if command_exists gcloud; then
         log_success "Google Cloud SDK is already installed"
-        gcloud version
 
         # Check if gcloud needs updating (check for Python 3.9 deprecation warning)
         log_info "Checking for gcloud updates..."
-        if brew list google-cloud-sdk &>/dev/null; then
+        if brew list google-cloud-sdk &>/dev/null || brew list gcloud-cli &>/dev/null; then
             log_info "Updating gcloud via Homebrew..."
-            brew upgrade google-cloud-sdk || log_warning "gcloud already up to date"
+            # Try to upgrade, but don't fail if it errors due to Python issues
+            if ! brew upgrade google-cloud-sdk 2>/dev/null && ! brew upgrade gcloud-cli 2>/dev/null; then
+                log_warning "gcloud upgrade encountered issues, trying reinstall..."
+                # Uninstall and reinstall to fix Python virtualenv issues
+                brew uninstall --ignore-dependencies google-cloud-sdk 2>/dev/null || true
+                brew uninstall --ignore-dependencies gcloud-cli 2>/dev/null || true
+                brew install --cask google-cloud-sdk
+            fi
         else
             log_warning "gcloud not installed via Homebrew - update manually if needed"
             log_info "To update: gcloud components update"
         fi
+
+        gcloud version
     else
         log_info "Installing Google Cloud SDK via Homebrew..."
-        brew install google-cloud-sdk
+        brew install --cask google-cloud-sdk
 
         # Source the SDK paths
         if [[ -f "/opt/homebrew/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/path.bash.inc" ]]; then
@@ -832,6 +852,7 @@ install_gcloud_sdk() {
     # Final verification
     local gcloud_version=$(gcloud version --format="value(version)" 2>/dev/null || echo "unknown")
     log_info "gcloud version: $gcloud_version"
+    log_info "Using Python: ${CLOUDSDK_PYTHON:-system default}"
 
     mark_step_completed "$step_name"
 }

@@ -126,30 +126,43 @@ if env_var_exists "OPENAI_API_KEY" "$ENV_FILE"; then
 fi
 ```
 
-### 5. GCloud SDK Auto-Update ✅
-The script now ensures gcloud SDK is up-to-date to avoid Python deprecation warnings.
+### 5. GCloud SDK Python Configuration ✅
+The script now configures gcloud to use Python 3.12, avoiding both deprecation warnings and virtualenv errors.
 
-**Problem:**
+**Problems:**
 ```
 WARNING: Python 3.9 will be deprecated on January 27th, 2026
+ERROR: (gcloud.config.virtualenv.create) /opt/homebrew/opt/python@3.13/libexec/bin/python3: command not found
 ```
 
 **Solution:**
+- Set `CLOUDSDK_PYTHON=python3.12` environment variable for all gcloud commands
 - Check for gcloud updates when SDK is already installed
 - Automatically upgrade via Homebrew if available
+- Handle upgrade failures gracefully with reinstall fallback
 - Provide manual update instructions if not using Homebrew
 
 **Code Added:**
 ```bash
+# Configure gcloud to use Python 3.12
+if command_exists python3.12; then
+    export CLOUDSDK_PYTHON="python3.12"
+    log_info "Configured gcloud to use Python 3.12"
+fi
+
 if command_exists gcloud; then
     # Check if gcloud needs updating
     log_info "Checking for gcloud updates..."
-    if brew list google-cloud-sdk &>/dev/null; then
+    if brew list google-cloud-sdk &>/dev/null || brew list gcloud-cli &>/dev/null; then
         log_info "Updating gcloud via Homebrew..."
-        brew upgrade google-cloud-sdk || log_warning "gcloud already up to date"
-    else
-        log_warning "gcloud not installed via Homebrew - update manually if needed"
-        log_info "To update: gcloud components update"
+        # Try to upgrade, but don't fail if it errors due to Python issues
+        if ! brew upgrade google-cloud-sdk 2>/dev/null && ! brew upgrade gcloud-cli 2>/dev/null; then
+            log_warning "gcloud upgrade encountered issues, trying reinstall..."
+            # Uninstall and reinstall to fix Python virtualenv issues
+            brew uninstall --ignore-dependencies google-cloud-sdk 2>/dev/null || true
+            brew uninstall --ignore-dependencies gcloud-cli 2>/dev/null || true
+            brew install --cask google-cloud-sdk
+        fi
     fi
 fi
 ```
@@ -196,8 +209,8 @@ All 13 setup steps now have progress tracking:
 - **After:** Checks existing values, shows masked previews, only updates on confirmation
 
 ### GCloud SDK
-- **Before:** Outdated SDK with Python 3.9 deprecation warnings
-- **After:** Auto-updates via Homebrew to use latest version
+- **Before:** Python 3.9 deprecation warnings, Python 3.13 virtualenv errors
+- **After:** Configured to use Python 3.12, auto-updates via Homebrew, handles upgrade failures
 
 ## Usage Examples
 
@@ -269,7 +282,8 @@ The setup script is now production-ready with:
 - ✅ Progress tracking and resume capability
 - ✅ Python 3.13 compatibility (auto-installs Python 3.12 for numba)
 - ✅ Smart environment variable handling (skips existing keys)
-- ✅ GCloud SDK auto-update (fixes Python 3.9 deprecation warnings)
+- ✅ GCloud SDK Python configuration (uses Python 3.12, fixes virtualenv errors)
+- ✅ GCloud SDK auto-update with reinstall fallback
 - ✅ numba build error fixed (pre-built wheels + llvm fallback)
 - ✅ All 13 steps tracked
 - ✅ Command-line options (--status, --reset, --help)
@@ -278,7 +292,8 @@ The setup script is now production-ready with:
 You can safely run the setup script knowing it will:
 1. Not waste time re-running completed steps
 2. Automatically install Python 3.12 if you have Python 3.13+
-3. Skip re-prompting for environment variables you've already entered
-4. Keep gcloud SDK updated to avoid deprecation warnings
-5. Handle the numba installation correctly with binary wheels
-6. Resume exactly where it left off if interrupted
+3. Configure gcloud to use Python 3.12 (avoiding both 3.9 deprecation and 3.13 errors)
+4. Skip re-prompting for environment variables you've already entered
+5. Keep gcloud SDK updated, with automatic reinstall if upgrade fails
+6. Handle the numba installation correctly with binary wheels
+7. Resume exactly where it left off if interrupted
